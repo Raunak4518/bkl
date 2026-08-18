@@ -11,6 +11,8 @@ import {
   useCallback,
   useMemo,
 } from "react";
+import dynamic from "next/dynamic";
+import Papa from "papaparse";
 
 import Prism from "prismjs";
 import Editor from "@monaco-editor/react";
@@ -21,7 +23,8 @@ import "xterm/css/xterm.css";
 import { 
   FileText, Folder, Image as ImageIcon, FileCode2, FileJson,
   FileIcon, FileType2, Terminal, Play, Save, Settings, LogOut,
-  ChevronRight, ArrowLeft, Plus, X, UploadCloud, ChevronDown
+  ChevronRight, ArrowLeft, Plus, X, UploadCloud, ChevronDown,
+  Film, Music
 } from "lucide-react";
 import "prismjs/themes/prism-tomorrow.css";
 import "prismjs/components/prism-c";
@@ -94,6 +97,9 @@ const TEXT_EXTENSIONS = Object.keys(EXTENSION_TO_LANGUAGE).concat([
 ]);
 
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"];
+const VIDEO_EXTENSIONS = [".mp4", ".webm", ".ogg", ".mov", ".mkv"];
+const AUDIO_EXTENSIONS = [".mp3", ".wav", ".ogg", ".aac"];
+const PDF_EXTENSIONS = [".pdf"];
 
 const TEMPLATES: Record<string, { label: string; extension: string; content: string }> = {
   cpp: {
@@ -212,6 +218,11 @@ const isImageFile = (name: string) => {
   return IMAGE_EXTENSIONS.includes(ext);
 };
 
+const isVideoFile = (name: string) => VIDEO_EXTENSIONS.includes(getExtension(name));
+const isAudioFile = (name: string) => AUDIO_EXTENSIONS.includes(getExtension(name));
+const isPdfFile = (name: string) => PDF_EXTENSIONS.includes(getExtension(name));
+const isSupportedMediaFile = (name: string) => isImageFile(name) || isVideoFile(name) || isAudioFile(name) || isPdfFile(name);
+
 const getFileIcon = (name: string, type: "file" | "dir", className = "h-4 w-4") => {
   if (type === "dir") return <Folder className={`${className} text-violet-400`} fill="currentColor" />;
   const ext = getExtension(name);
@@ -221,6 +232,9 @@ const getFileIcon = (name: string, type: "file" | "dir", className = "h-4 w-4") 
   if (ext === ".md") return <FileText className={`${className} text-emerald-400`} />;
   if ([".json", ".ipynb"].includes(ext)) return <FileJson className={`${className} text-orange-400`} />;
   if (isImageFile(name)) return <ImageIcon className={`${className} text-purple-400`} />;
+  if (isVideoFile(name)) return <Film className={`${className} text-pink-400`} />;
+  if (isAudioFile(name)) return <Music className={`${className} text-blue-300`} />;
+  if (isPdfFile(name)) return <FileText className={`${className} text-red-400`} />;
   return <FileIcon className={`${className} text-slate-400`} />;
 };
 
@@ -234,6 +248,78 @@ const highlightCode = (code: string, fileName: string): string => {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+};
+
+/* ------------------------------------------------------------------ */
+/*  Data Viewers                                                       */
+/* ------------------------------------------------------------------ */
+
+const ReactJson = dynamic(() => import("react-json-view"), { ssr: false });
+
+const CsvViewer = ({ content }: { content: string }) => {
+  const [isDark, setIsDark] = useState(true);
+  const parsed = useMemo(() => {
+    try {
+      return Papa.parse(content, { header: true, skipEmptyLines: true });
+    } catch { return null; }
+  }, [content]);
+
+  if (!parsed || !parsed.meta.fields) return <div className="text-red-500 p-4">Failed to parse CSV</div>;
+
+  return (
+    <div className={`w-full h-full p-4 overflow-auto shadow-inner relative ${isDark ? 'bg-[#0d1117]' : 'bg-slate-100'}`}>
+      <button onClick={() => setIsDark(!isDark)} className={`absolute top-6 right-6 z-20 px-3 py-1 text-xs rounded border transition shadow-lg ${isDark ? 'bg-[#21262d] border-[#30363d] text-slate-300 hover:bg-[#30363d]' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'}`}>
+        {isDark ? "☀ Light Mode" : "🌙 Dark Mode"}
+      </button>
+      <div className={`rounded shadow border overflow-x-auto ${isDark ? 'bg-[#161b22] border-[#30363d]' : 'bg-white border-slate-300'}`}>
+        <table className={`w-full text-sm text-left whitespace-nowrap ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>
+          <thead className={`text-xs uppercase sticky top-0 shadow-sm z-10 ${isDark ? 'text-slate-400 bg-[#21262d]' : 'text-slate-600 bg-slate-200'}`}>
+            <tr>
+              <th className={`px-4 py-3 font-semibold border-b border-r w-12 text-center ${isDark ? 'bg-[#21262d] border-[#30363d] text-slate-500' : 'bg-slate-200 border-slate-300 text-slate-400'}`}>#</th>
+              {parsed.meta.fields.map((field, idx) => (
+                <th key={idx} className={`px-6 py-3 font-semibold border-b ${isDark ? 'border-[#30363d] bg-[#21262d]' : 'border-slate-300 bg-slate-200'}`}>{field}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {parsed.data.slice(0, 100).map((row: any, idx) => (
+              <tr key={idx} className={`border-b transition-colors ${isDark ? 'border-[#30363d] hover:bg-[#21262d]' : 'border-slate-200 hover:bg-violet-50'}`}>
+                <td className={`px-4 py-3 border-r text-center ${isDark ? 'text-slate-500 border-[#30363d] bg-[#161b22]' : 'text-slate-400 border-slate-200 bg-slate-50'}`}>{idx + 1}</td>
+                {parsed.meta.fields?.map((field, vIdx) => (
+                  <td key={vIdx} className="px-6 py-3">{row[field]}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {parsed.data.length > 100 && (
+          <div className={`p-4 text-center italic text-xs border-t ${isDark ? 'text-slate-500 bg-[#161b22] border-[#30363d]' : 'text-slate-500 bg-slate-50 border-slate-200'}`}>
+            Showing first 100 rows of {parsed.data.length} total rows.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const JsonViewer = ({ content }: { content: string }) => {
+  const [isDark, setIsDark] = useState(true);
+  const parsed = useMemo(() => {
+    try { return JSON.parse(content); } catch { return null; }
+  }, [content]);
+
+  if (!parsed) return <div className="text-red-500 p-4">Failed to parse JSON</div>;
+
+  return (
+    <div className={`w-full h-full p-6 overflow-auto relative text-left ${isDark ? 'bg-[#0d1117]' : 'bg-slate-100'}`}>
+      <button onClick={() => setIsDark(!isDark)} className={`absolute top-6 right-6 z-20 px-3 py-1 text-xs rounded border transition shadow-lg ${isDark ? 'bg-[#21262d] border-[#30363d] text-slate-300 hover:bg-[#30363d]' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'}`}>
+        {isDark ? "☀ Light Mode" : "🌙 Dark Mode"}
+      </button>
+      <div className={`p-4 rounded shadow border overflow-x-auto ${isDark ? 'bg-[#1e1e1e] border-[#30363d]' : 'bg-white border-slate-300'}`}>
+        <ReactJson src={parsed} theme={isDark ? "monokai" : "rjv-default"} displayDataTypes={false} enableClipboard={false} style={{ backgroundColor: "transparent", fontSize: "14px" }} />
+      </div>
+    </div>
+  );
 };
 
 /* ------------------------------------------------------------------ */
@@ -257,6 +343,9 @@ export default function Home() {
   const [executing, setExecuting] = useState(false);
   const [execOutput, setExecOutput] = useState<{ stdout: string; stderr: string; code: number } | null>(null);
   const [execStdin, setExecStdin] = useState("");
+  const [execArgs, setExecArgs] = useState("");
+  const [execPlots, setExecPlots] = useState<string[]>([]);
+  const [replInput, setReplInput] = useState("");
 
   // Advanced IDE features state
   const [openCmdk, setOpenCmdk] = useState(false);
@@ -266,6 +355,40 @@ export default function Home() {
   useEffect(() => {
     setMounted(true);
     
+    // Background Pre-Warming for Data Science Kernel
+    setTimeout(async () => {
+      try {
+        if (!(window as any).pyodide) {
+          if (!document.getElementById("pyodide-script")) {
+            const script = document.createElement("script");
+            script.id = "pyodide-script";
+            script.src = "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js";
+            document.head.appendChild(script);
+            await new Promise((resolve) => script.onload = resolve);
+          }
+          (window as any).pyodideStdout = "";
+          (window as any).pyodideStderr = "";
+          (window as any).pyodide = await (window as any).loadPyodide({
+            stdout: (msg: string) => { (window as any).pyodideStdout += msg + "\n"; },
+            stderr: (msg: string) => { (window as any).pyodideStderr += msg + "\n"; },
+          });
+          await (window as any).pyodide.loadPackage(["micropip"]);
+          const micropip = (window as any).pyodide.pyimport("micropip");
+          await micropip.install(["pandas", "numpy", "matplotlib", "scikit-learn", "scipy"]);
+          
+          await (window as any).pyodide.runPythonAsync(`
+import matplotlib
+matplotlib.use("module://matplotlib_pyodide.html5_canvas_backend")
+import matplotlib.pyplot as plt
+plt.show = lambda *args, **kwargs: None
+          `);
+          console.log("Pyodide Pre-warmed & Ready!");
+        }
+      } catch (e) {
+        console.error("Pyodide Pre-warm failed", e);
+      }
+    }, 1000);
+
     const down = (e: globalThis.KeyboardEvent) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -359,6 +482,7 @@ export default function Home() {
   const [editorFileName, setEditorFileName] = useState("");
   const [editorFilePath, setEditorFilePath] = useState<string | null>(null);
   const [editorFileSha, setEditorFileSha] = useState<string | null>(null);
+  const [editorFileUrl, setEditorFileUrl] = useState<string | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorLoading, setEditorLoading] = useState(false);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -624,8 +748,11 @@ export default function Home() {
   };
 
   const openFileForViewing = async (item: RepoItem) => {
-    if (!isTextFile(item.name)) {
-      // Non-text files: open in new tab
+    const isText = isTextFile(item.name);
+    const isMedia = isSupportedMediaFile(item.name);
+
+    if (!isText && !isMedia) {
+      // Completely unsupported binary files: open in new tab
       const url = item.download_url || item.html_url || "";
       if (url) window.open(url, "_blank", "noopener,noreferrer");
       return;
@@ -637,6 +764,27 @@ export default function Home() {
     setEditorFilePath(item.path);
     setEditorContent("");
     setEditorFileSha(null);
+    setEditorFileUrl(null);
+
+    if (isMedia) {
+      if (isPdfFile(item.name) && item.download_url) {
+        try {
+          const res = await fetch(item.download_url);
+          const blob = await res.blob();
+          const pdfBlob = new Blob([blob], { type: "application/pdf" });
+          setEditorFileUrl(URL.createObjectURL(pdfBlob));
+        } catch (e) {
+          console.error("Failed to load PDF blob", e);
+          setEditorFileUrl(item.download_url);
+        }
+      } else {
+        setEditorFileUrl(item.download_url || null);
+      }
+      setEditorLoading(false);
+      return;
+    }
+
+    setEditorFileUrl(item.download_url || null);
 
     try {
       const params = new URLSearchParams({ owner, repo, branch, path: item.path });
@@ -666,6 +814,10 @@ export default function Home() {
     setEditorFileName("");
     setEditorFilePath(null);
     setEditorFileSha(null);
+    if (editorFileUrl && editorFileUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(editorFileUrl);
+    }
+    setEditorFileUrl(null);
   };
 
   const saveFile = async () => {
@@ -722,7 +874,6 @@ export default function Home() {
       saveFile();
     }
   };
-
   // Syntax-highlighted HTML for viewer
   const highlightedHtml = useMemo(() => {
     if (viewMode !== "viewer" || !editorContent) return "";
@@ -730,7 +881,7 @@ export default function Home() {
   }, [viewMode, editorContent, editorFileName]);
 
   /* ---------------------------------------------------------------- */
-  /*  Run Code (Piston API)                                            */
+  /*  Run Code (Piston API & Pyodide)                                  */
   /* ---------------------------------------------------------------- */
   const handleRunCode = async () => {
     const ext = getExtension(editorFileName);
@@ -749,6 +900,93 @@ export default function Home() {
     setStatus({ type: "loading", message: "Executing code..." });
 
     try {
+      if (language === "python") {
+        setStatus({ type: "loading", message: "Starting Data Science Kernel..." });
+        
+        (window as any).pyodideStdout = "";
+        (window as any).pyodideStderr = "";
+        
+        if (!(window as any).pyodide) {
+          if (!document.getElementById("pyodide-script")) {
+            const script = document.createElement("script");
+            script.id = "pyodide-script";
+            script.src = "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js";
+            document.head.appendChild(script);
+            await new Promise((resolve) => script.onload = resolve);
+          }
+          (window as any).pyodide = await (window as any).loadPyodide({
+            stdout: (msg: string) => { (window as any).pyodideStdout += msg + "\n"; },
+            stderr: (msg: string) => { (window as any).pyodideStderr += msg + "\n"; },
+          });
+          await (window as any).pyodide.loadPackage(["micropip"]);
+          const micropip = (window as any).pyodide.pyimport("micropip");
+          setStatus({ type: "loading", message: "Installing pandas, numpy & matplotlib..." });
+          await micropip.install(["pandas", "numpy", "matplotlib"]);
+          
+          await (window as any).pyodide.runPythonAsync(`
+import matplotlib.pyplot as plt
+# Disable plt.show() so it doesn't block execution or try to render natively
+plt.show = lambda *args, **kwargs: None
+`);
+        }
+        
+        const pyodide = (window as any).pyodide;
+        
+        setStatus({ type: "loading", message: "Mounting workspace data..." });
+        const itemsResponse = await fetch(`/api/repo?owner=${owner}&repo=${repo}&branch=${branch}&path=${currentPath}`);
+        if (itemsResponse.ok) {
+          const items: RepoItem[] = await itemsResponse.json();
+          for (const item of items) {
+            if (item.type === "file" && item.download_url) {
+              try {
+                const res = await fetch(item.download_url);
+                const buffer = await res.arrayBuffer();
+                pyodide.FS.writeFile(item.name, new Uint8Array(buffer));
+              } catch (e) {
+                console.warn("Failed to mount file", item.name);
+              }
+            }
+          }
+        }
+
+        setStatus({ type: "loading", message: "Running script..." });
+        
+        try {
+          await pyodide.runPythonAsync(editorContent);
+          
+          // Capture plots
+          const plotData = await pyodide.runPythonAsync(`
+import sys
+if 'matplotlib.pyplot' in sys.modules:
+    import matplotlib.pyplot as plt
+    import io, base64
+    _plots = []
+    for fig_num in plt.get_fignums():
+        fig = plt.figure(fig_num)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        img_str = base64.b64encode(buf.read()).decode('utf-8')
+        _plots.append("data:image/png;base64," + img_str)
+    plt.close('all')
+    _plots
+else:
+    []
+`);
+          const plots = plotData.toJs();
+          setExecPlots(plots || []);
+
+          setExecOutput({ stdout: (window as any).pyodideStdout, stderr: (window as any).pyodideStderr, code: 0 });
+          setStatus({ type: "success", message: "Execution complete." });
+        } catch (e: any) {
+          setExecPlots([]);
+          setExecOutput({ stdout: (window as any).pyodideStdout, stderr: (window as any).pyodideStderr + "\n" + e.toString(), code: 1 });
+          setStatus({ type: "error", message: "Execution failed." });
+        }
+        return;
+      }
+
+      // Standard API for C/C++
       const response = await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -756,18 +994,15 @@ export default function Home() {
           language,
           code: editorContent,
           stdin: execStdin,
+          args: execArgs,
         }),
       });
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Execution failed.");
 
-      setExecOutput({
-        stdout: data.stdout,
-        stderr: data.stderr,
-        code: data.code,
-      });
-      setStatus({ type: "idle", message: "" });
+      setExecOutput(data);
+      setStatus({ type: "success", message: "Execution complete." });
     } catch (error) {
       setStatus({ type: "error", message: error instanceof Error ? error.message : "Execution failed." });
     } finally {
@@ -776,6 +1011,133 @@ export default function Home() {
   };
 
   /* ---------------------------------------------------------------- */
+  /*  Python REPL & Notebook Execution                                 */
+  /* ---------------------------------------------------------------- */
+  const handleReplSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!replInput.trim() || !(window as any).pyodide) return;
+    
+    setExecuting(true);
+    const cmd = replInput;
+    setReplInput("");
+    
+    if (xtermInstance.current) {
+      xtermInstance.current.write(`\x1b[33m>>> ${cmd}\x1b[0m\r\n`);
+    }
+    
+    (window as any).pyodideStdout = "";
+    (window as any).pyodideStderr = "";
+    
+    try {
+      const pyodide = (window as any).pyodide;
+      await pyodide.runPythonAsync(cmd);
+      if (xtermInstance.current) {
+        if ((window as any).pyodideStdout) xtermInstance.current.write((window as any).pyodideStdout.replace(/\n/g, '\r\n') + '\r\n');
+        if ((window as any).pyodideStderr) xtermInstance.current.write('\x1b[31m' + (window as any).pyodideStderr.replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
+      }
+    } catch (err: any) {
+      if (xtermInstance.current) {
+        xtermInstance.current.write('\x1b[31m' + err.toString().replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
+      }
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  const handleRunNotebook = async () => {
+    if (!(window as any).pyodide) {
+      setStatus({ type: "error", message: "Data Science Kernel is still initializing. Please wait." });
+      return;
+    }
+    
+    setExecuting(true);
+    setStatus({ type: "loading", message: "Running notebook cells..." });
+    
+    try {
+      const notebook = JSON.parse(editorContent);
+      const pyodide = (window as any).pyodide;
+      
+      for (let i = 0; i < notebook.cells.length; i++) {
+        const cell = notebook.cells[i];
+        if (cell.cell_type === "code") {
+          const code = Array.isArray(cell.source) ? cell.source.join("") : cell.source;
+          (window as any).pyodideStdout = "";
+          (window as any).pyodideStderr = "";
+          
+          try {
+            const result = await pyodide.runPythonAsync(code);
+            cell.outputs = [];
+            if ((window as any).pyodideStdout) {
+              cell.outputs.push({
+                output_type: "stream",
+                name: "stdout",
+                text: (window as any).pyodideStdout.split('\n').map((l: string, idx: number, arr: string[]) => l + (idx === arr.length - 1 ? '' : '\n')).filter((s: string) => s)
+              });
+            }
+            if (result !== undefined) {
+              let resStr = String(result);
+              if (result && result.toString && typeof result.toString === 'function') {
+                resStr = result.toString();
+              }
+              cell.outputs.push({
+                output_type: "execute_result",
+                data: {
+                  "text/plain": [resStr]
+                },
+                execution_count: i + 1
+              });
+            }
+            
+            const plotData = await pyodide.runPythonAsync(`
+import sys
+if 'matplotlib.pyplot' in sys.modules:
+    import matplotlib.pyplot as plt
+    import io, base64
+    _plots = []
+    for fig_num in plt.get_fignums():
+        fig = plt.figure(fig_num)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        img_str = base64.b64encode(buf.read()).decode('utf-8')
+        _plots.append(img_str)
+    plt.close('all')
+    _plots
+else:
+    []
+`);
+            const plots = plotData.toJs();
+            if (plots && plots.length > 0) {
+               for (const p of plots) {
+                  cell.outputs.push({
+                     output_type: "display_data",
+                     data: {
+                        "image/png": p
+                     }
+                  });
+               }
+            }
+          } catch (err: any) {
+            cell.outputs = [{
+              output_type: "error",
+              ename: "Error",
+              evalue: err.toString(),
+              traceback: err.toString().split('\n')
+            }];
+          }
+        }
+      }
+      
+      setEditorContent(JSON.stringify(notebook, null, 2));
+      setStatus({ type: "success", message: "Notebook executed successfully. (Press Ctrl+S to save outputs)" });
+    } catch (e: any) {
+      setStatus({ type: "error", message: "Notebook execution failed: " + e.message });
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  // Upload state---------------------------------------------------------------- */
   /*  Computed values & Render Helpers                                  */
   /* ---------------------------------------------------------------- */
 
@@ -800,10 +1162,28 @@ export default function Home() {
                     <code className="language-python" dangerouslySetInnerHTML={{ __html: html }} />
                   </pre>
                   {cell.outputs && cell.outputs.length > 0 && (
-                    <div className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400">
+                    <div className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400 flex flex-col gap-2">
                       {cell.outputs.map((out: any, j: number) => {
-                        const outText = Array.isArray(out.text) ? out.text.join("") : out.text;
-                        return outText ? <pre key={j} className="whitespace-pre-wrap">{outText}</pre> : null;
+                        if (out.output_type === "stream") {
+                          const outText = Array.isArray(out.text) ? out.text.join("") : out.text;
+                          return outText ? <pre key={j} className="whitespace-pre-wrap">{outText}</pre> : null;
+                        } else if (out.output_type === "execute_result" || out.output_type === "display_data") {
+                          const data = out.data || {};
+                          if (data["image/png"]) {
+                            const src = data["image/png"].startsWith("data:") ? data["image/png"] : `data:image/png;base64,${data["image/png"]}`;
+                            return <img key={j} src={src} className="max-w-full bg-white p-2 rounded" alt="output" />;
+                          } else if (data["text/html"]) {
+                            const html = Array.isArray(data["text/html"]) ? data["text/html"].join("") : data["text/html"];
+                            return <div key={j} dangerouslySetInnerHTML={{ __html: html }} className="bg-white p-2 text-black" />;
+                          } else if (data["text/plain"]) {
+                            const text = Array.isArray(data["text/plain"]) ? data["text/plain"].join("") : data["text/plain"];
+                            return <pre key={j} className="whitespace-pre-wrap text-emerald-400">{text}</pre>;
+                          }
+                        } else if (out.output_type === "error") {
+                          const errText = Array.isArray(out.traceback) ? out.traceback.join("\n") : (out.evalue || "");
+                          return <pre key={j} className="whitespace-pre-wrap text-red-400">{errText}</pre>;
+                        }
+                        return null;
                       })}
                     </div>
                   )}
@@ -1032,6 +1412,12 @@ export default function Home() {
                     {editorSaving ? "Saving..." : "Save File"}
                   </button>
                 )}
+                {getExtension(editorFileName) === ".ipynb" && viewMode === "viewer" && (
+                  <button type="button" onClick={handleRunNotebook} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-orange-600 to-red-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(234,88,12,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    {executing ? "Running..." : "Run Notebook"}
+                  </button>
+                )}
                 {[".py", ".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName)) && (
                   <button type="button" onClick={handleRunCode} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(37,99,235,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
                     <Play className="h-3.5 w-3.5 fill-current" />
@@ -1088,17 +1474,29 @@ export default function Home() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex-1 overflow-auto p-6 bg-[#0d1117]">
-                    {getExtension(editorFileName) === ".md" ? (
-                      <div className="prose prose-invert max-w-4xl mx-auto text-slate-300">
+                  <div className="flex-1 overflow-auto bg-[#0d1117] flex items-center justify-center">
+                    {isImageFile(editorFileName) ? (
+                      <div className="flex h-full items-center justify-center p-6"><img src={editorFileUrl || undefined} alt={editorFileName} className="max-w-full max-h-full object-contain shadow-xl rounded" /></div>
+                    ) : isVideoFile(editorFileName) ? (
+                      <div className="flex h-full items-center justify-center p-6"><video src={editorFileUrl || undefined} controls className="max-w-full max-h-full shadow-xl rounded" /></div>
+                    ) : isAudioFile(editorFileName) ? (
+                      <div className="flex h-full items-center justify-center p-6"><audio src={editorFileUrl || undefined} controls className="w-96 shadow-xl" /></div>
+                    ) : isPdfFile(editorFileName) ? (
+                      <iframe src={editorFileUrl || undefined} className="w-full h-full border-none rounded bg-white" />
+                    ) : getExtension(editorFileName) === ".csv" ? (
+                      <div className="w-full h-full self-start"><CsvViewer content={editorContent} /></div>
+                    ) : getExtension(editorFileName) === ".json" ? (
+                      <div className="w-full h-full self-start"><JsonViewer content={editorContent} /></div>
+                    ) : getExtension(editorFileName) === ".md" ? (
+                      <div className="prose prose-invert max-w-4xl mx-auto text-slate-300 w-full self-start p-6">
                         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{editorContent}</ReactMarkdown>
                       </div>
                     ) : getExtension(editorFileName) === ".ipynb" ? (
-                      <div className="max-w-5xl mx-auto">
+                      <div className="max-w-5xl mx-auto w-full self-start p-6">
                         {renderNotebook(editorContent)}
                       </div>
                     ) : (
-                      <pre className="font-mono text-sm leading-relaxed max-w-5xl mx-auto">
+                      <pre className="font-mono text-sm leading-relaxed max-w-5xl mx-auto w-full self-start p-6">
                         <code className={`language-${getLanguage(editorFileName) || "none"}`} dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
                       </pre>
                     )}
@@ -1127,11 +1525,19 @@ export default function Home() {
                 </button>
               </div>
               <div className="flex-1 flex overflow-hidden">
-                <div className="w-1/3 flex flex-col border-r border-[#30363d] p-3">
-                  <span className="text-xs text-slate-500 mb-2 uppercase font-semibold">Standard Input</span>
-                  <textarea value={execStdin} onChange={(e) => setExecStdin(e.target.value)} placeholder="Enter input here..." className="flex-1 resize-none rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
+                <div className="w-1/3 flex flex-col border-r border-[#30363d] p-3 gap-3">
+                  <div className="flex flex-col flex-1">
+                    <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Standard Input</span>
+                    <textarea value={execStdin} onChange={(e) => setExecStdin(e.target.value)} placeholder="Enter input here..." className="flex-1 resize-none rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
+                  </div>
+                  {([".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName))) && (
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Command Line Args</span>
+                      <input type="text" value={execArgs} onChange={(e) => setExecArgs(e.target.value)} placeholder="e.g. arg1 arg2" className="rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
+                    </div>
+                  )}
                 </div>
-                  <div className="flex-1 overflow-auto p-3 font-mono text-sm bg-black/40 relative">
+                  <div className="flex-1 overflow-auto p-3 font-mono text-sm bg-black/40 relative flex flex-col">
                     {executing ? (
                       <div className="flex items-center gap-2 text-blue-400 animate-pulse absolute top-3 left-3 z-10">
                         <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -1140,7 +1546,25 @@ export default function Home() {
                     ) : !execOutput && (
                       <span className="text-slate-600 italic absolute top-3 left-3 z-10">Click Run to execute. Output will appear here.</span>
                     )}
-                    <div ref={xtermRef} className="h-full w-full" />
+                    <div ref={xtermRef} className={`w-full ${execPlots.length > 0 ? 'h-1/2' : 'h-full shrink-0'}`} style={{ minHeight: '150px' }} />
+                    {execPlots.length > 0 && (
+                      <div className="h-1/2 mt-4 pt-4 border-t border-[#30363d] overflow-auto flex flex-col gap-4">
+                        {execPlots.map((plotSrc, idx) => (
+                          <div key={idx} className="group relative bg-white p-2 rounded w-max mx-auto shadow-xl">
+                            <a href={plotSrc} download={`plot-${idx + 1}.png`} className="absolute top-2 right-2 bg-black/60 p-1.5 rounded text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-violet-600" title="Download Plot">
+                              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            </a>
+                            <img src={plotSrc} alt={`Plot ${idx + 1}`} className="max-w-full" />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {getExtension(editorFileName) === ".py" && (
+                      <form onSubmit={handleReplSubmit} className="mt-2 shrink-0 relative">
+                        <span className="absolute left-2 top-1.5 text-yellow-500 font-bold">{'>>>'}</span>
+                        <input type="text" value={replInput} onChange={(e) => setReplInput(e.target.value)} placeholder="Type Python command and press Enter (Interactive REPL)" className="w-full bg-[#161b22] border border-[#30363d] rounded py-1.5 pl-10 pr-2 text-sm text-slate-300 font-mono focus:border-violet-500 outline-none" />
+                      </form>
+                    )}
                   </div>
                 </div>
               </div>

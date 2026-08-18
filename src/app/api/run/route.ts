@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { language, code, stdin } = await request.json();
+    const { language, code, stdin, args } = await request.json();
 
     if (!language || !code) {
       return NextResponse.json({ error: "Language and code are required." }, { status: 400 });
@@ -37,6 +37,7 @@ export async function POST(request: NextRequest) {
         compiler: compiler,
         code: code,
         stdin: stdin || "",
+        "runtime-option-raw": args ? args.split(" ").join("\n") : "",
         save: false,
       }),
     });
