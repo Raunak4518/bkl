@@ -41,6 +41,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 
+import { useIsMobile } from "./hooks/useIsMobile";
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -68,6 +70,16 @@ type QueuedFile = {
 };
 
 type ViewMode = "browse" | "viewer" | "editor";
+
+type OpenTab = {
+  key: string;
+  path: string | null;
+  name: string;
+  sha: string | null;
+  url: string | null;
+  isDirty: boolean;
+  mode: ViewMode;
+};
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -349,6 +361,11 @@ export default function Home() {
 
   // Advanced IDE features state
   const [openCmdk, setOpenCmdk] = useState(false);
+
+  // Responsive shell
+  const isMobile = useIsMobile();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileTerminalOpen, setMobileTerminalOpen] = useState(false);
   const xtermRef = useRef<HTMLDivElement>(null);
   const xtermInstance = useRef<XTermType | null>(null);
 
@@ -486,6 +503,12 @@ plt.show = lambda *args, **kwargs: None
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorLoading, setEditorLoading] = useState(false);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const tempTabIdRef = useRef(0);
+
+  // Open file tabs
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
+  const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
+  const tabContentsRef = useRef<Record<string, string>>({});
 
   // Execution state moved up
 
@@ -738,13 +761,53 @@ plt.show = lambda *args, **kwargs: None
   /*  Code editor / viewer                                             */
   /* ---------------------------------------------------------------- */
 
+  /** Stash the active tab's live editor content so switching tabs never loses it. */
+  const persistActiveTabContent = () => {
+    if (activeTabKey) {
+      tabContentsRef.current[activeTabKey] = editorContent;
+    }
+  };
+
+  const markActiveTabDirty = () => {
+    if (!activeTabKey) return;
+    setOpenTabs((tabs) => tabs.map((t) => (t.key === activeTabKey && !t.isDirty ? { ...t, isDirty: true } : t)));
+  };
+
+  const addTab = (tab: OpenTab) => {
+    setOpenTabs((tabs) => [...tabs, tab]);
+    setActiveTabKey(tab.key);
+  };
+
+  const activateTab = (key: string, tabs: OpenTab[] = openTabs) => {
+    const tab = tabs.find((t) => t.key === key);
+    if (!tab) return;
+    persistActiveTabContent();
+    setActiveTabKey(key);
+    setEditorFileName(tab.name);
+    setEditorFilePath(tab.path);
+    setEditorFileSha(tab.sha);
+    setEditorFileUrl(tab.url);
+    setEditorContent(tabContentsRef.current[key] ?? "");
+    setViewMode(tab.mode);
+  };
+
   const openNewFile = (templateKey: string) => {
     const template = TEMPLATES[templateKey] || TEMPLATES.empty;
+    persistActiveTabContent();
+
+    tempTabIdRef.current += 1;
+    const tempId = `new-${tempTabIdRef.current}`;
+    const name = `untitled${template.extension}`;
+
     setEditorContent(template.content);
-    setEditorFileName(`untitled${template.extension}`);
+    setEditorFileName(name);
     setEditorFilePath(null);
     setEditorFileSha(null);
+    setEditorFileUrl(null);
     setViewMode("editor");
+
+    tabContentsRef.current[tempId] = template.content;
+    addTab({ key: tempId, path: null, name, sha: null, url: null, isDirty: false, mode: "editor" });
   };
 
   const openFileForViewing = async (item: RepoItem) => {
@@ -758,6 +821,15 @@ plt.show = lambda *args, **kwargs: None
       return;
     }
 
+    // Already open? Just switch to that tab instead of re-fetching.
+    const existingTab = openTabs.find((t) => t.path === item.path);
+    if (existingTab) {
+      activateTab(existingTab.key);
+      return;
+    }
+
+    persistActiveTabContent();
+
     setEditorLoading(true);
     setViewMode("viewer");
     setEditorFileName(item.name);
@@ -766,21 +838,24 @@ plt.show = lambda *args, **kwargs: None
     setEditorFileSha(null);
     setEditorFileUrl(null);
 
+    const tabKey = item.path;
+
     if (isMedia) {
+      let url = item.download_url || null;
       if (isPdfFile(item.name) && item.download_url) {
         try {
           const res = await fetch(item.download_url);
           const blob = await res.blob();
           const pdfBlob = new Blob([blob], { type: "application/pdf" });
-          setEditorFileUrl(URL.createObjectURL(pdfBlob));
+          url = URL.createObjectURL(pdfBlob);
         } catch (e) {
           console.error("Failed to load PDF blob", e);
-          setEditorFileUrl(item.download_url);
         }
-      } else {
-        setEditorFileUrl(item.download_url || null);
       }
+      setEditorFileUrl(url);
       setEditorLoading(false);
+      tabContentsRef.current[tabKey] = "";
+      addTab({ key: tabKey, path: item.path, name: item.name, sha: null, url, isDirty: false, mode: "viewer" });
       return;
     }
 
@@ -794,6 +869,8 @@ plt.show = lambda *args, **kwargs: None
 
       setEditorContent(payload.content);
       setEditorFileSha(payload.sha);
+      tabContentsRef.current[tabKey] = payload.content;
+      addTab({ key: tabKey, path: item.path, name: item.name, sha: payload.sha, url: item.download_url || null, isDirty: false, mode: "viewer" });
     } catch (error) {
       setStatus({ type: "error", message: error instanceof Error ? error.message : "Failed to load file." });
       setViewMode("browse");
@@ -804,20 +881,47 @@ plt.show = lambda *args, **kwargs: None
 
   const switchToEditor = () => {
     setViewMode("editor");
+    if (activeTabKey) {
+      setOpenTabs((tabs) => tabs.map((t) => (t.key === activeTabKey ? { ...t, mode: "editor" } : t)));
+    }
     // Focus textarea after React renders
     requestAnimationFrame(() => editorRef.current?.focus());
   };
 
-  const closeEditor = () => {
-    setViewMode("browse");
-    setEditorContent("");
-    setEditorFileName("");
-    setEditorFilePath(null);
-    setEditorFileSha(null);
-    if (editorFileUrl && editorFileUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(editorFileUrl);
+  const logout = async () => {
+    try {
+      await fetch("/api/auth", { method: "DELETE" });
+    } finally {
+      window.location.href = "/login";
     }
-    setEditorFileUrl(null);
+  };
+
+  const closeTab = (key: string) => {
+    const tab = openTabs.find((t) => t.key === key);
+    if (!tab) return;
+    if (tab.isDirty && !window.confirm(`Discard unsaved changes to "${tab.name}"?`)) return;
+    if (tab.url && tab.url.startsWith("blob:")) URL.revokeObjectURL(tab.url);
+
+    delete tabContentsRef.current[key];
+
+    const idx = openTabs.findIndex((t) => t.key === key);
+    const remaining = openTabs.filter((t) => t.key !== key);
+    setOpenTabs(remaining);
+
+    if (key !== activeTabKey) return;
+
+    const neighbor = remaining[idx] || remaining[idx - 1] || null;
+    if (neighbor) {
+      activateTab(neighbor.key, remaining);
+    } else {
+      setActiveTabKey(null);
+      setEditorFileName("");
+      setEditorFilePath(null);
+      setEditorFileSha(null);
+      setEditorFileUrl(null);
+      setEditorContent("");
+      setViewMode("browse");
+    }
   };
 
   const saveFile = async () => {
@@ -842,11 +946,25 @@ plt.show = lambda *args, **kwargs: None
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Failed to save.");
 
+      const savedPath = payload.path || filePath;
+      const priorKey = activeTabKey;
+
       setEditorFileSha(payload.sha);
-      setEditorFilePath(payload.path || filePath);
+      setEditorFilePath(savedPath);
       setCommitMessage("");
       setStatus({ type: "success", message: `${editorFileSha ? "Updated" : "Created"} ${name}.` });
       setViewMode("viewer");
+
+      if (priorKey) {
+        tabContentsRef.current[savedPath] = editorContent;
+        if (priorKey !== savedPath) delete tabContentsRef.current[priorKey];
+        setOpenTabs((tabs) => tabs.map((t) =>
+          t.key === priorKey
+            ? { ...t, key: savedPath, path: savedPath, name, sha: payload.sha, isDirty: false, mode: "viewer" as ViewMode }
+            : t
+        ));
+        setActiveTabKey(savedPath);
+      }
       await fetchRepoContents(currentPath, owner, repo, branch);
     } catch (error) {
       setStatus({ type: "error", message: error instanceof Error ? error.message : "Save failed." });
@@ -1129,6 +1247,7 @@ else:
       }
       
       setEditorContent(JSON.stringify(notebook, null, 2));
+      markActiveTabDirty();
       setStatus({ type: "success", message: "Notebook executed successfully. (Press Ctrl+S to save outputs)" });
     } catch (e: any) {
       setStatus({ type: "error", message: "Notebook execution failed: " + e.message });
@@ -1206,8 +1325,354 @@ else:
   const totalSize = queue.reduce((sum, q) => sum + q.file.size, 0);
 
   const showTerminal = Boolean(
-    (execOutput || [".py", ".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName))) 
+    (execOutput || [".py", ".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName)))
     && editorFileName
+  );
+
+  /* ---------------------------------------------------------------- */
+  /*  Responsive shell helpers                                         */
+  /* ---------------------------------------------------------------- */
+
+  const handleSidebarNavigate = (path: string) => {
+    navigateTo(path);
+    if (isMobile) setMobileSidebarOpen(false);
+  };
+  const handleSidebarOpenFile = (item: RepoItem) => {
+    openFileForViewing(item);
+    if (isMobile) setMobileSidebarOpen(false);
+  };
+
+  const sidebarBody = (
+    <div className="flex flex-col h-full w-full bg-[#161b22] min-w-0 overflow-hidden">
+      {/* Workspace Header */}
+      <div className="flex items-center justify-between border-b border-[#30363d] p-4 bg-[#161b22]">
+        <div className="flex items-center gap-2">
+          <svg className="h-5 w-5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+            <polyline points="9 22 9 12 15 12 15 22"></polyline>
+          </svg>
+          <span className="font-semibold text-white truncate bg-clip-text text-transparent bg-gradient-to-r from-violet-400 to-indigo-400">{repo || "Workspace"}</span>
+        </div>
+        <button type="button" onClick={logout} className="p-1.5 -m-1.5 text-slate-400 hover:text-red-400 transition hover:scale-110" title="Logout">
+          <LogOut className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* Explorer Toolbar */}
+      <div className="flex items-center justify-between p-3 border-b border-[#30363d] bg-[#0d1117]/50">
+        <div className="flex gap-1 flex-1">
+          <input type="text" value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCreateFolder(); }}
+            placeholder="Folder..."
+            className="w-full min-w-0 rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 text-xs outline-none transition focus:border-violet-500" />
+          <button type="button" onClick={handleCreateFolder} disabled={!newFolderName.trim()}
+            className="shrink-0 rounded bg-[#21262d] px-2 py-1 text-xs font-medium text-slate-300 transition hover:bg-[#30363d] hover:text-white hover:shadow-[0_0_10px_rgba(139,92,246,0.3)] disabled:opacity-40">
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="relative group ml-2">
+          <button type="button" className="shrink-0 rounded bg-[#21262d] px-2 py-1 text-xs font-medium text-slate-300 transition hover:bg-[#30363d] hover:text-white flex items-center gap-1 hover:shadow-[0_0_10px_rgba(139,92,246,0.3)]">
+            <Plus className="h-3 w-3" /> File
+          </button>
+          <div className="absolute left-0 top-full z-10 mt-1 hidden min-w-[120px] rounded border border-[#30363d] bg-[#161b22] py-1 shadow-xl group-hover:block">
+            {Object.entries(TEMPLATES).map(([key, t]) => (
+              <button key={key} type="button" onClick={() => { openNewFile(key); if (isMobile) setMobileSidebarOpen(false); }}
+                className="block w-full px-3 py-1.5 text-left text-xs text-slate-300 transition hover:bg-[#30363d] hover:text-white">
+                {t.label}{t.extension && ` (${t.extension})`}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* File Browser List */}
+      <div className="flex-1 overflow-auto py-2">
+        {/* Breadcrumb back button */}
+        {breadcrumb.length > 0 && (
+          <button type="button" onClick={() => handleSidebarNavigate(breadcrumb.slice(0, -1).join("/"))}
+            className="flex w-full items-center gap-2 px-4 py-1.5 text-sm text-slate-400 hover:bg-[#21262d] hover:text-slate-200">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            ..
+          </button>
+        )}
+
+        {loading ? (
+          <div className="px-4 py-2 text-xs text-slate-500">Loading...</div>
+        ) : sortedItems.length === 0 ? (
+          <div className="px-4 py-2 text-xs text-slate-500 italic">Empty folder</div>
+        ) : (
+          sortedItems.map((item) => (
+            <div key={item.path} className={`group flex items-center justify-between px-3 py-1.5 text-sm transition-all duration-200 cursor-pointer ${item.path === editorFilePath ? 'bg-[#21262d] text-white border-l-2 border-violet-500 shadow-[inset_20px_0_20px_-20px_rgba(139,92,246,0.3)]' : 'text-[#c9d1d9] border-l-2 border-transparent hover:bg-[#21262d] hover:text-white'}`}
+                 onClick={() => item.type === "dir" ? handleSidebarNavigate(item.path) : handleSidebarOpenFile(item)}>
+              <div className="flex flex-1 items-center gap-2 truncate text-left transition-transform duration-200 group-hover:translate-x-1">
+                <span className="shrink-0">{getFileIcon(item.name, item.type as "file" | "dir")}</span>
+                <span className="truncate">{item.name}</span>
+              </div>
+              {item.type === "file" && item.download_url && (
+                <a href={item.download_url} download={item.name} onClick={(e) => e.stopPropagation()} className="shrink-0 text-slate-500 hover:text-violet-400 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </a>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Upload Zone */}
+      <div className="border-t border-[#30363d] p-3 text-xs bg-[#161b22]">
+        <form onSubmit={handleUpload}>
+          <div onClick={() => fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={handleDrop} className={`flex cursor-pointer flex-col items-center justify-center rounded border border-dashed p-3 text-center transition ${dragging ? 'border-violet-500 bg-[#21262d]' : 'border-[#484f58] hover:border-violet-400 hover:bg-[#21262d]'}`}>
+            <input ref={fileInputRef} type="file" multiple onChange={handleFileChange} className="hidden" />
+            <span className="mb-1 text-slate-400 whitespace-nowrap">Drop files or click</span>
+          </div>
+          {queue.length > 0 && (
+            <div className="mt-2 space-y-2">
+              <div className="flex items-center justify-between text-slate-400">
+                <span>{queue.length} file(s) ({formatBytes(totalSize)})</span>
+                <button type="button" onClick={() => setQueue([])} className="hover:text-white">✕</button>
+              </div>
+              <input type="text" value={commitMessage} onChange={(e) => setCommitMessage(e.target.value)} placeholder="Commit msg..." className="w-full rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 outline-none focus:border-violet-500 text-white" />
+              <button type="submit" disabled={uploading || pendingCount === 0} className="w-full rounded bg-gradient-to-r from-violet-600 to-indigo-600 py-1.5 font-medium text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(139,92,246,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
+                {uploading ? "Uploading..." : "Upload"}
+              </button>
+            </div>
+          )}
+        </form>
+      </div>
+    </div>
+  );
+
+  const topBar = (
+    <div className="flex items-center justify-between border-b border-[#30363d] bg-[#0d1117]/80 backdrop-blur-md px-4 py-2 shrink-0 min-h-[53px] z-10 gap-2 flex-wrap">
+      <div className="flex items-center gap-2 text-sm text-slate-400 min-w-0">
+        {isMobile && (
+          <button type="button" onClick={() => setMobileSidebarOpen(true)} className="p-2 -ml-2 mr-1 shrink-0 text-slate-300 hover:text-white" title="Open file explorer">
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+          </button>
+        )}
+        <span className="truncate">{repo}</span>
+        {breadcrumb.map((seg) => (
+          <span key={seg} className="flex items-center gap-2 shrink-0">
+            <span>/</span><span>{seg}</span>
+          </span>
+        ))}
+        {editorFileName && (
+          <span className="flex items-center gap-2 min-w-0">
+            <span>/</span>
+            <span className="text-white font-medium truncate">
+              {viewMode === "editor" && !editorFilePath ? (
+                <input type="text" value={editorFileName} onChange={(e) => {
+                  const value = e.target.value;
+                  setEditorFileName(value);
+                  if (activeTabKey) {
+                    setOpenTabs((tabs) => tabs.map((t) => (t.key === activeTabKey ? { ...t, name: value } : t)));
+                  }
+                }} className="bg-transparent border-b border-violet-500 outline-none w-32" />
+              ) : (
+                editorFileName
+              )}
+            </span>
+            {editorFileSha === null && <span className="text-emerald-400 text-xs px-1 border border-emerald-400/30 rounded shrink-0">New</span>}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-3 flex-wrap">
+        {status.message && (
+          <span className={`text-xs px-2 py-1 rounded ${status.type === 'error' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+            {status.message}
+          </span>
+        )}
+        {editorFileName && (
+          <>
+            <button type="button" onClick={() => activeTabKey && closeTab(activeTabKey)} className="rounded bg-[#21262d] px-3 py-1.5 text-xs font-medium transition hover:bg-[#30363d]">
+              Close
+            </button>
+            {viewMode === "viewer" ? (
+              <button type="button" onClick={switchToEditor} className="rounded bg-gradient-to-r from-violet-600 to-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(139,92,246,0.3)]">
+                Edit File
+              </button>
+            ) : (
+              <button type="button" onClick={saveFile} disabled={editorSaving || !editorFileName.trim()} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
+                <Save className="h-3.5 w-3.5" />
+                {editorSaving ? "Saving..." : "Save File"}
+              </button>
+            )}
+            {getExtension(editorFileName) === ".ipynb" && viewMode === "viewer" && (
+              <button type="button" onClick={handleRunNotebook} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-orange-600 to-red-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(234,88,12,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
+                <Play className="h-3.5 w-3.5 fill-current" />
+                {executing ? "Running..." : "Run Notebook"}
+              </button>
+            )}
+            {[".py", ".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName)) && (
+              <button type="button" onClick={handleRunCode} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(37,99,235,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
+                <Play className="h-3.5 w-3.5 fill-current" />
+                {executing ? "Running..." : "Run"}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const tabStrip = openTabs.length > 0 ? (
+    <div className="flex items-center gap-0.5 border-b border-[#30363d] bg-[#0d1117] px-2 overflow-x-auto shrink-0">
+      {openTabs.map((tab) => (
+        <div
+          key={tab.key}
+          onClick={() => tab.key !== activeTabKey && activateTab(tab.key)}
+          className={`group flex shrink-0 items-center gap-2 border-t-2 px-3 py-2 text-xs cursor-pointer transition-colors ${tab.key === activeTabKey ? "border-violet-500 bg-[#161b22] text-white" : "border-transparent text-slate-400 hover:bg-[#161b22]/60 hover:text-slate-200"}`}
+          title={tab.path || tab.name}
+        >
+          <span className="shrink-0">{getFileIcon(tab.name, "file", "h-3.5 w-3.5")}</span>
+          <span className="max-w-35 truncate">{tab.name}</span>
+          {tab.isDirty && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400" title="Unsaved changes" />}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); closeTab(tab.key); }}
+            className="shrink-0 -mr-1 rounded p-0.5 text-slate-500 opacity-0 transition-opacity hover:bg-[#30363d] hover:text-white group-hover:opacity-100"
+            title={`Close ${tab.name}`}
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+    </div>
+  ) : null;
+
+  const editorPane = (
+    <div className="h-full w-full">
+      <div className="flex flex-col h-full w-full min-h-0 relative bg-[#0d1117]">
+        {!editorFileName ? (
+          <div className="flex h-full flex-col items-center justify-center text-slate-500">
+            <svg className="h-16 w-16 mb-4 text-[#30363d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+              <polyline points="13 2 13 9 20 9"></polyline>
+            </svg>
+            <h2 className="text-xl font-medium text-slate-300">No file selected</h2>
+            <p className="mt-2 text-sm text-slate-400">Select a file from the explorer or create a new one.</p>
+          </div>
+        ) : viewMode === "editor" ? (
+          <div className="flex flex-1 flex-col overflow-hidden">
+            {([".md", ".ipynb"].includes(getExtension(editorFileName))) && (
+              <div className="flex border-b border-[#30363d] px-4 pt-2 bg-[#0d1117] shrink-0">
+                <button type="button" onClick={() => setEditorTab("code")} className={`border-b-2 px-4 py-2 text-sm font-medium transition ${editorTab === "code" ? "border-violet-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>Code</button>
+                <button type="button" onClick={() => setEditorTab("preview")} className={`border-b-2 px-4 py-2 text-sm font-medium transition ${editorTab === "preview" ? "border-violet-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>Preview</button>
+              </div>
+            )}
+
+            <div className="flex-1 overflow-auto bg-[#1e1e1e]">
+              {editorTab === "code" || ![".md", ".ipynb"].includes(getExtension(editorFileName)) ? (
+                <Editor
+                  height="100%"
+                  language={getMonacoLanguage(editorFileName)}
+                  theme="vs-dark"
+                  value={editorContent}
+                  onChange={(value) => { setEditorContent(value || ""); markActiveTabDirty(); }}
+                  options={{ minimap: { enabled: false }, fontSize: 14, wordWrap: "on", padding: { top: 16 } }}
+                />
+              ) : getExtension(editorFileName) === ".md" ? (
+                <div className="prose prose-invert max-w-4xl mx-auto p-8 text-slate-300">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{editorContent}</ReactMarkdown>
+                </div>
+              ) : (
+                <div className="p-8 max-w-5xl mx-auto">
+                  {renderNotebook(editorContent)}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 overflow-auto bg-[#0d1117] flex items-center justify-center">
+            {isImageFile(editorFileName) ? (
+              <div className="flex h-full items-center justify-center p-6"><img src={editorFileUrl || undefined} alt={editorFileName} className="max-w-full max-h-full object-contain shadow-xl rounded" /></div>
+            ) : isVideoFile(editorFileName) ? (
+              <div className="flex h-full items-center justify-center p-6"><video src={editorFileUrl || undefined} controls className="max-w-full max-h-full shadow-xl rounded" /></div>
+            ) : isAudioFile(editorFileName) ? (
+              <div className="flex h-full items-center justify-center p-6"><audio src={editorFileUrl || undefined} controls className="w-96 shadow-xl" /></div>
+            ) : isPdfFile(editorFileName) ? (
+              <iframe src={editorFileUrl || undefined} className="w-full h-full border-none rounded bg-white" />
+            ) : getExtension(editorFileName) === ".csv" ? (
+              <div className="w-full h-full self-start"><CsvViewer content={editorContent} /></div>
+            ) : getExtension(editorFileName) === ".json" ? (
+              <div className="w-full h-full self-start"><JsonViewer content={editorContent} /></div>
+            ) : getExtension(editorFileName) === ".md" ? (
+              <div className="prose prose-invert max-w-4xl mx-auto text-slate-300 w-full self-start p-6">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{editorContent}</ReactMarkdown>
+              </div>
+            ) : getExtension(editorFileName) === ".ipynb" ? (
+              <div className="max-w-5xl mx-auto w-full self-start p-6">
+                {renderNotebook(editorContent)}
+              </div>
+            ) : (
+              <pre className="font-mono text-sm leading-relaxed max-w-5xl mx-auto w-full self-start p-6">
+                <code className={`language-${getLanguage(editorFileName) || "none"}`} dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderTerminalBody = (stacked: boolean) => (
+    <div className="flex flex-col h-full w-full bg-[#0d1117]/80 backdrop-blur-xl shrink-0 shadow-[0_-5px_20px_rgba(0,0,0,0.5)] z-20">
+      <div className="flex h-full flex-col">
+        <div className="flex items-center justify-between border-b border-[#30363d] px-4 py-1.5 bg-[#161b22]/90">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <Terminal className="h-4 w-4" />
+            <span className={!execOutput ? 'text-violet-400' : ''}>Terminal</span>
+          </div>
+          <button type="button" onClick={() => setExecOutput(null)} className="p-1.5 -m-1.5 text-slate-500 hover:text-white transition">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className={`flex-1 flex overflow-hidden ${stacked ? 'flex-col' : ''}`}>
+          <div className={`${stacked ? 'w-full border-r-0 border-b' : 'w-1/3 border-r'} flex flex-col border-[#30363d] p-3 gap-3`}>
+            <div className="flex flex-col flex-1">
+              <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Standard Input</span>
+              <textarea value={execStdin} onChange={(e) => setExecStdin(e.target.value)} placeholder="Enter input here..." className="flex-1 resize-none rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
+            </div>
+            {([".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName))) && (
+              <div className="flex flex-col">
+                <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Command Line Args</span>
+                <input type="text" value={execArgs} onChange={(e) => setExecArgs(e.target.value)} placeholder="e.g. arg1 arg2" className="rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
+              </div>
+            )}
+          </div>
+          <div className="flex-1 overflow-auto p-3 font-mono text-sm bg-black/40 relative flex flex-col">
+            {executing ? (
+              <div className="flex items-center gap-2 text-blue-400 animate-pulse absolute top-3 left-3 z-10">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                Running code...
+              </div>
+            ) : !execOutput && (
+              <span className="text-slate-600 italic absolute top-3 left-3 z-10">Click Run to execute. Output will appear here.</span>
+            )}
+            <div ref={xtermRef} className={`w-full ${execPlots.length > 0 ? 'h-1/2' : 'h-full shrink-0'}`} style={{ minHeight: '150px' }} />
+            {execPlots.length > 0 && (
+              <div className="h-1/2 mt-4 pt-4 border-t border-[#30363d] overflow-auto flex flex-col gap-4">
+                {execPlots.map((plotSrc, idx) => (
+                  <div key={idx} className="group relative bg-white p-2 rounded w-max mx-auto shadow-xl">
+                    <a href={plotSrc} download={`plot-${idx + 1}.png`} className="absolute top-2 right-2 bg-black/60 p-1.5 rounded text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-violet-600" title="Download Plot">
+                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </a>
+                    <img src={plotSrc} alt={`Plot ${idx + 1}`} className="max-w-full" />
+                  </div>
+                ))}
+              </div>
+            )}
+            {getExtension(editorFileName) === ".py" && (
+              <form onSubmit={handleReplSubmit} className="mt-2 shrink-0 relative">
+                <span className="absolute left-2 top-1.5 text-yellow-500 font-bold">{'>>>'}</span>
+                <input type="text" value={replInput} onChange={(e) => setReplInput(e.target.value)} placeholder="Type Python command and press Enter (Interactive REPL)" className="w-full bg-[#161b22] border border-[#30363d] rounded py-1.5 pl-10 pr-2 text-sm text-slate-300 font-mono focus:border-violet-500 outline-none" />
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 
   /* ---------------------------------------------------------------- */
@@ -1216,7 +1681,7 @@ else:
   
   if (!mounted) {
     return (
-      <main className="flex h-screen w-full bg-[#0d1117] text-[#c9d1d9] overflow-hidden selection:bg-[rgba(56,139,253,0.3)]">
+      <main className="flex h-dvh w-full bg-[#0d1117] text-[#c9d1d9] overflow-hidden selection:bg-[rgba(56,139,253,0.3)]">
         <div className="flex h-full w-full items-center justify-center">
           <span className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-violet-500 border-t-transparent" />
         </div>
@@ -1225,7 +1690,7 @@ else:
   }
 
   return (
-    <main className="h-screen w-full bg-[#0d1117] text-[#c9d1d9] overflow-hidden selection:bg-[rgba(56,139,253,0.3)]">
+    <main className="h-dvh w-full bg-[#0d1117] text-[#c9d1d9] overflow-hidden selection:bg-[rgba(56,139,253,0.3)]">
       {/* Command Palette */}
       {openCmdk && (
         <div className="fixed inset-0 z-[100] flex items-start justify-center bg-black/50 pt-[10vh] backdrop-blur-sm" onClick={() => setOpenCmdk(false)}>
@@ -1250,7 +1715,7 @@ else:
                   <Command.Item onSelect={() => { setOpenCmdk(false); handleRunCode(); }} className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2.5 text-sm text-slate-200 hover:bg-violet-600 hover:text-white aria-selected:bg-violet-600 aria-selected:text-white transition-colors">
                     <Play className="h-4 w-4" /> Run Current File
                   </Command.Item>
-                  <Command.Item onSelect={() => { setOpenCmdk(false); window.location.href = "/"; }} className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2.5 text-sm text-red-400 hover:bg-red-600 hover:text-white aria-selected:bg-red-600 aria-selected:text-white transition-colors">
+                  <Command.Item onSelect={() => { setOpenCmdk(false); logout(); }} className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2.5 text-sm text-red-400 hover:bg-red-600 hover:text-white aria-selected:bg-red-600 aria-selected:text-white transition-colors">
                     <LogOut className="h-4 w-4" /> Logout
                   </Command.Item>
                 </Command.Group>
@@ -1260,321 +1725,79 @@ else:
         </div>
       )}
 
-      <PanelGroup orientation="horizontal" id="main-layout-v4" className="h-full w-full">
-        {/* ---- Sidebar (File Explorer) ---- */}
-        <Panel defaultSize="20%" minSize="15%" maxSize="40%">
-          <div className="flex flex-col h-full w-full bg-[#161b22] min-w-0 overflow-hidden">
-        {/* Workspace Header */}
-        <div className="flex items-center justify-between border-b border-[#30363d] p-4 bg-[#161b22]">
-          <div className="flex items-center gap-2">
-            <svg className="h-5 w-5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-              <polyline points="9 22 9 12 15 12 15 22"></polyline>
-            </svg>
-            <span className="font-semibold text-white truncate bg-clip-text text-transparent bg-gradient-to-r from-violet-400 to-indigo-400">{repo || "Workspace"}</span>
-          </div>
-          <button type="button" onClick={() => window.location.href = "/"} className="text-slate-400 hover:text-red-400 transition hover:scale-110" title="Logout">
-            <LogOut className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* Explorer Toolbar */}
-        <div className="flex items-center justify-between p-3 border-b border-[#30363d] bg-[#0d1117]/50">
-          <div className="flex gap-1 flex-1">
-            <input type="text" value={newFolderName}
-              onChange={(e) => setNewFolderName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleCreateFolder(); }}
-              placeholder="Folder..."
-              className="w-full min-w-0 rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 text-xs outline-none transition focus:border-violet-500" />
-            <button type="button" onClick={handleCreateFolder} disabled={!newFolderName.trim()}
-              className="shrink-0 rounded bg-[#21262d] px-2 py-1 text-xs font-medium text-slate-300 transition hover:bg-[#30363d] hover:text-white hover:shadow-[0_0_10px_rgba(139,92,246,0.3)] disabled:opacity-40">
-              <Plus className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="relative group ml-2">
-            <button type="button" className="shrink-0 rounded bg-[#21262d] px-2 py-1 text-xs font-medium text-slate-300 transition hover:bg-[#30363d] hover:text-white flex items-center gap-1 hover:shadow-[0_0_10px_rgba(139,92,246,0.3)]">
-              <Plus className="h-3 w-3" /> File
-            </button>
-            <div className="absolute left-0 top-full z-10 mt-1 hidden min-w-[120px] rounded border border-[#30363d] bg-[#161b22] py-1 shadow-xl group-hover:block">
-              {Object.entries(TEMPLATES).map(([key, t]) => (
-                <button key={key} type="button" onClick={() => openNewFile(key)}
-                  className="block w-full px-3 py-1.5 text-left text-xs text-slate-300 transition hover:bg-[#30363d] hover:text-white">
-                  {t.label}{t.extension && ` (${t.extension})`}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* File Browser List */}
-        <div className="flex-1 overflow-auto py-2">
-          {/* Breadcrumb back button */}
-          {breadcrumb.length > 0 && (
-            <button type="button" onClick={() => navigateTo(breadcrumb.slice(0, -1).join("/"))}
-              className="flex w-full items-center gap-2 px-4 py-1.5 text-sm text-slate-400 hover:bg-[#21262d] hover:text-slate-200">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-              ..
-            </button>
+      {isMobile ? (
+        <div className="flex flex-col h-full w-full relative overflow-hidden bg-[#0d1117]">
+          {/* ---- Mobile sidebar drawer ---- */}
+          {mobileSidebarOpen && (
+            <div className="fixed inset-0 z-30 bg-black/50" onClick={() => setMobileSidebarOpen(false)} />
           )}
-
-          {loading ? (
-            <div className="px-4 py-2 text-xs text-slate-500">Loading...</div>
-          ) : sortedItems.length === 0 ? (
-            <div className="px-4 py-2 text-xs text-slate-500 italic">Empty folder</div>
-          ) : (
-            sortedItems.map((item) => (
-              <div key={item.path} className={`group flex items-center justify-between px-3 py-1.5 text-sm transition-all duration-200 cursor-pointer ${item.path === editorFilePath ? 'bg-[#21262d] text-white border-l-2 border-violet-500 shadow-[inset_20px_0_20px_-20px_rgba(139,92,246,0.3)]' : 'text-[#c9d1d9] border-l-2 border-transparent hover:bg-[#21262d] hover:text-white'}`}
-                   onClick={() => item.type === "dir" ? navigateTo(item.path) : openFileForViewing(item)}>
-                <div className="flex flex-1 items-center gap-2 truncate text-left transition-transform duration-200 group-hover:translate-x-1">
-                  <span className="shrink-0">{getFileIcon(item.name, item.type as "file" | "dir")}</span>
-                  <span className="truncate">{item.name}</span>
-                </div>
-                {item.type === "file" && item.download_url && (
-                  <a href={item.download_url} download={item.name} onClick={(e) => e.stopPropagation()} className="shrink-0 text-slate-500 hover:text-violet-400 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  </a>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Upload Zone */}
-        <div className="border-t border-[#30363d] p-3 text-xs bg-[#161b22]">
-          <form onSubmit={handleUpload}>
-            <div onClick={() => fileInputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={handleDrop} className={`flex cursor-pointer flex-col items-center justify-center rounded border border-dashed p-3 text-center transition ${dragging ? 'border-violet-500 bg-[#21262d]' : 'border-[#484f58] hover:border-violet-400 hover:bg-[#21262d]'}`}>
-              <input ref={fileInputRef} type="file" multiple onChange={handleFileChange} className="hidden" />
-              <span className="mb-1 text-slate-400 whitespace-nowrap">Drop files or click</span>
-            </div>
-            {queue.length > 0 && (
-              <div className="mt-2 space-y-2">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>{queue.length} file(s) ({formatBytes(totalSize)})</span>
-                  <button type="button" onClick={() => setQueue([])} className="hover:text-white">✕</button>
-                </div>
-                <input type="text" value={commitMessage} onChange={(e) => setCommitMessage(e.target.value)} placeholder="Commit msg..." className="w-full rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 outline-none focus:border-violet-500 text-white" />
-                <button type="submit" disabled={uploading || pendingCount === 0} className="w-full rounded bg-gradient-to-r from-violet-600 to-indigo-600 py-1.5 font-medium text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(139,92,246,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
-                  {uploading ? "Uploading..." : "Upload"}
-                </button>
-              </div>
-            )}
-          </form>
-        </div>
+          <div className={`fixed inset-y-0 left-0 z-40 w-[85vw] max-w-sm transition-transform duration-200 ease-out ${mobileSidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+            {sidebarBody}
           </div>
-        </Panel>
 
-        <PanelResizeHandle className="w-1 bg-[#30363d] hover:bg-violet-500 transition-colors cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-violet-500" />
+          {topBar}
+          {tabStrip}
 
-        {/* ---- Main Editor Area ---- */}
-        <Panel defaultSize="80%">
-          <div className="flex flex-col h-full w-full relative overflow-hidden bg-[#0d1117] min-w-0">
-        {/* Top Breadcrumb & Actions Bar */}
-        <div className="flex items-center justify-between border-b border-[#30363d] bg-[#0d1117]/80 backdrop-blur-md px-4 py-2 shrink-0 h-[53px] z-10">
-          <div className="flex items-center gap-2 text-sm text-slate-400">
-            <span>{repo}</span>
-            {breadcrumb.map((seg) => (
-              <span key={seg} className="flex items-center gap-2">
-                <span>/</span><span>{seg}</span>
-              </span>
-            ))}
-            {editorFileName && (
-              <span className="flex items-center gap-2">
-                <span>/</span>
-                <span className="text-white font-medium">
-                  {viewMode === "editor" && !editorFilePath ? (
-                    <input type="text" value={editorFileName} onChange={(e) => setEditorFileName(e.target.value)} className="bg-transparent border-b border-violet-500 outline-none w-32" />
-                  ) : (
-                    editorFileName
-                  )}
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {editorPane}
+          </div>
+
+          {/* ---- Terminal (collapsible sheet) ---- */}
+          {showTerminal && (
+            <div className="border-t border-[#30363d] shrink-0">
+              <button
+                type="button"
+                onClick={() => setMobileTerminalOpen((open) => !open)}
+                className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-slate-400 bg-[#161b22]"
+              >
+                <span className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  Terminal
                 </span>
-                {editorFileSha === null && <span className="text-emerald-400 text-xs px-1 border border-emerald-400/30 rounded">New</span>}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            {status.message && (
-              <span className={`text-xs px-2 py-1 rounded ${status.type === 'error' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
-                {status.message}
-              </span>
-            )}
-            {editorFileName && (
-              <>
-                <button type="button" onClick={closeEditor} className="rounded bg-[#21262d] px-3 py-1.5 text-xs font-medium transition hover:bg-[#30363d]">
-                  Close
-                </button>
-                {viewMode === "viewer" ? (
-                  <button type="button" onClick={switchToEditor} className="rounded bg-gradient-to-r from-violet-600 to-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(139,92,246,0.3)]">
-                    Edit File
-                  </button>
-                ) : (
-                  <button type="button" onClick={saveFile} disabled={editorSaving || !editorFileName.trim()} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
-                    <Save className="h-3.5 w-3.5" />
-                    {editorSaving ? "Saving..." : "Save File"}
-                  </button>
-                )}
-                {getExtension(editorFileName) === ".ipynb" && viewMode === "viewer" && (
-                  <button type="button" onClick={handleRunNotebook} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-orange-600 to-red-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(234,88,12,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
-                    <Play className="h-3.5 w-3.5 fill-current" />
-                    {executing ? "Running..." : "Run Notebook"}
-                  </button>
-                )}
-                {[".py", ".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName)) && (
-                  <button type="button" onClick={handleRunCode} disabled={executing} className="rounded flex items-center gap-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-1.5 text-xs font-semibold text-white transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_15px_rgba(37,99,235,0.4)] disabled:opacity-50 disabled:hover:scale-100 disabled:hover:shadow-none">
-                    <Play className="h-3.5 w-3.5 fill-current" />
-                    {executing ? "Running..." : "Run"}
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        <PanelGroup orientation="vertical" id="editor-layout-v5" className="flex-1 min-h-0 w-full">
-          {/* Content Area */}
-          <Panel>
-            <div className="h-full w-full">
-              <div className="flex flex-col h-full w-full min-h-0 relative bg-[#0d1117]">
-                {!editorFileName ? (
-                  <div className="flex h-full flex-col items-center justify-center text-slate-500">
-                    <svg className="h-16 w-16 mb-4 text-[#30363d]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-                      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                      <polyline points="13 2 13 9 20 9"></polyline>
-                    </svg>
-                    <h2 className="text-xl font-medium text-slate-300">No file selected</h2>
-                    <p className="mt-2 text-sm text-slate-400">Select a file from the explorer or create a new one.</p>
-                  </div>
-                ) : viewMode === "editor" ? (
-                  <div className="flex flex-1 flex-col overflow-hidden">
-                    {([".md", ".ipynb"].includes(getExtension(editorFileName))) && (
-                      <div className="flex border-b border-[#30363d] px-4 pt-2 bg-[#0d1117] shrink-0">
-                        <button type="button" onClick={() => setEditorTab("code")} className={`border-b-2 px-4 py-2 text-sm font-medium transition ${editorTab === "code" ? "border-violet-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>Code</button>
-                        <button type="button" onClick={() => setEditorTab("preview")} className={`border-b-2 px-4 py-2 text-sm font-medium transition ${editorTab === "preview" ? "border-violet-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>Preview</button>
-                      </div>
-                    )}
-                    
-                    <div className="flex-1 overflow-auto bg-[#1e1e1e]">
-                      {editorTab === "code" || ![".md", ".ipynb"].includes(getExtension(editorFileName)) ? (
-                        <Editor
-                          height="100%"
-                          language={getMonacoLanguage(editorFileName)}
-                          theme="vs-dark"
-                          value={editorContent}
-                          onChange={(value) => setEditorContent(value || "")}
-                          options={{ minimap: { enabled: false }, fontSize: 14, wordWrap: "on", padding: { top: 16 } }}
-                        />
-                      ) : getExtension(editorFileName) === ".md" ? (
-                        <div className="prose prose-invert max-w-4xl mx-auto p-8 text-slate-300">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{editorContent}</ReactMarkdown>
-                        </div>
-                      ) : (
-                        <div className="p-8 max-w-5xl mx-auto">
-                          {renderNotebook(editorContent)}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex-1 overflow-auto bg-[#0d1117] flex items-center justify-center">
-                    {isImageFile(editorFileName) ? (
-                      <div className="flex h-full items-center justify-center p-6"><img src={editorFileUrl || undefined} alt={editorFileName} className="max-w-full max-h-full object-contain shadow-xl rounded" /></div>
-                    ) : isVideoFile(editorFileName) ? (
-                      <div className="flex h-full items-center justify-center p-6"><video src={editorFileUrl || undefined} controls className="max-w-full max-h-full shadow-xl rounded" /></div>
-                    ) : isAudioFile(editorFileName) ? (
-                      <div className="flex h-full items-center justify-center p-6"><audio src={editorFileUrl || undefined} controls className="w-96 shadow-xl" /></div>
-                    ) : isPdfFile(editorFileName) ? (
-                      <iframe src={editorFileUrl || undefined} className="w-full h-full border-none rounded bg-white" />
-                    ) : getExtension(editorFileName) === ".csv" ? (
-                      <div className="w-full h-full self-start"><CsvViewer content={editorContent} /></div>
-                    ) : getExtension(editorFileName) === ".json" ? (
-                      <div className="w-full h-full self-start"><JsonViewer content={editorContent} /></div>
-                    ) : getExtension(editorFileName) === ".md" ? (
-                      <div className="prose prose-invert max-w-4xl mx-auto text-slate-300 w-full self-start p-6">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{editorContent}</ReactMarkdown>
-                      </div>
-                    ) : getExtension(editorFileName) === ".ipynb" ? (
-                      <div className="max-w-5xl mx-auto w-full self-start p-6">
-                        {renderNotebook(editorContent)}
-                      </div>
-                    ) : (
-                      <pre className="font-mono text-sm leading-relaxed max-w-5xl mx-auto w-full self-start p-6">
-                        <code className={`language-${getLanguage(editorFileName) || "none"}`} dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
-                      </pre>
-                    )}
-                  </div>
-                )}
+                <ChevronDown className={`h-4 w-4 transition-transform ${mobileTerminalOpen ? "rotate-180" : ""}`} />
+              </button>
+              <div className="overflow-hidden transition-[height] duration-200" style={{ height: mobileTerminalOpen ? "55dvh" : 0 }}>
+                {renderTerminalBody(true)}
               </div>
             </div>
+          )}
+        </div>
+      ) : (
+        <PanelGroup orientation="horizontal" id="main-layout-v4" className="h-full w-full">
+          {/* ---- Sidebar (File Explorer) ---- */}
+          <Panel defaultSize="20%" minSize="15%" maxSize="40%">
+            {sidebarBody}
           </Panel>
 
-          {/* ---- Terminal / Output Panel ---- */}
-          {showTerminal ? (
-            <PanelResizeHandle className="h-1 bg-[#30363d] hover:bg-violet-500 transition-colors cursor-row-resize z-30 outline-none focus-visible:ring-1 focus-visible:ring-violet-500" />
-          ) : null}
-          
-          {showTerminal ? (
-            <Panel defaultSize="30%" minSize="15%" maxSize="70%">
-              <div className="flex flex-col h-full w-full bg-[#0d1117]/80 backdrop-blur-xl shrink-0 shadow-[0_-5px_20px_rgba(0,0,0,0.5)] z-20">
-            <div className="flex h-full flex-col">
-              <div className="flex items-center justify-between border-b border-[#30363d] px-4 py-1.5 bg-[#161b22]/90">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  <Terminal className="h-4 w-4" />
-                  <span className={!execOutput ? 'text-violet-400' : ''}>Terminal</span>
-                </div>
-                <button type="button" onClick={() => setExecOutput(null)} className="text-slate-500 hover:text-white transition">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="flex-1 flex overflow-hidden">
-                <div className="w-1/3 flex flex-col border-r border-[#30363d] p-3 gap-3">
-                  <div className="flex flex-col flex-1">
-                    <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Standard Input</span>
-                    <textarea value={execStdin} onChange={(e) => setExecStdin(e.target.value)} placeholder="Enter input here..." className="flex-1 resize-none rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
-                  </div>
-                  {([".cpp", ".cxx", ".cc", ".c"].includes(getExtension(editorFileName))) && (
-                    <div className="flex flex-col">
-                      <span className="text-xs text-slate-500 mb-1 uppercase font-semibold">Command Line Args</span>
-                      <input type="text" value={execArgs} onChange={(e) => setExecArgs(e.target.value)} placeholder="e.g. arg1 arg2" className="rounded bg-[#161b22]/50 border border-[#30363d] p-2 text-sm font-mono text-slate-300 outline-none focus:border-violet-500 transition-colors" />
-                    </div>
-                  )}
-                </div>
-                  <div className="flex-1 overflow-auto p-3 font-mono text-sm bg-black/40 relative flex flex-col">
-                    {executing ? (
-                      <div className="flex items-center gap-2 text-blue-400 animate-pulse absolute top-3 left-3 z-10">
-                        <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        Running code...
-                      </div>
-                    ) : !execOutput && (
-                      <span className="text-slate-600 italic absolute top-3 left-3 z-10">Click Run to execute. Output will appear here.</span>
-                    )}
-                    <div ref={xtermRef} className={`w-full ${execPlots.length > 0 ? 'h-1/2' : 'h-full shrink-0'}`} style={{ minHeight: '150px' }} />
-                    {execPlots.length > 0 && (
-                      <div className="h-1/2 mt-4 pt-4 border-t border-[#30363d] overflow-auto flex flex-col gap-4">
-                        {execPlots.map((plotSrc, idx) => (
-                          <div key={idx} className="group relative bg-white p-2 rounded w-max mx-auto shadow-xl">
-                            <a href={plotSrc} download={`plot-${idx + 1}.png`} className="absolute top-2 right-2 bg-black/60 p-1.5 rounded text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-violet-600" title="Download Plot">
-                              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                            </a>
-                            <img src={plotSrc} alt={`Plot ${idx + 1}`} className="max-w-full" />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {getExtension(editorFileName) === ".py" && (
-                      <form onSubmit={handleReplSubmit} className="mt-2 shrink-0 relative">
-                        <span className="absolute left-2 top-1.5 text-yellow-500 font-bold">{'>>>'}</span>
-                        <input type="text" value={replInput} onChange={(e) => setReplInput(e.target.value)} placeholder="Type Python command and press Enter (Interactive REPL)" className="w-full bg-[#161b22] border border-[#30363d] rounded py-1.5 pl-10 pr-2 text-sm text-slate-300 font-mono focus:border-violet-500 outline-none" />
-                      </form>
-                    )}
-                  </div>
-                </div>
-              </div>
-              </div>
-            </Panel>
-          ) : null}
+          <PanelResizeHandle className="w-1 bg-[#30363d] hover:bg-violet-500 transition-colors cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-violet-500" />
+
+          {/* ---- Main Editor Area ---- */}
+          <Panel defaultSize="80%">
+            <div className="flex flex-col h-full w-full relative overflow-hidden bg-[#0d1117] min-w-0">
+              {topBar}
+              {tabStrip}
+
+              <PanelGroup orientation="vertical" id="editor-layout-v5" className="flex-1 min-h-0 w-full">
+                {/* Content Area */}
+                <Panel>
+                  {editorPane}
+                </Panel>
+
+                {/* ---- Terminal / Output Panel ---- */}
+                {showTerminal ? (
+                  <PanelResizeHandle className="h-1 bg-[#30363d] hover:bg-violet-500 transition-colors cursor-row-resize z-30 outline-none focus-visible:ring-1 focus-visible:ring-violet-500" />
+                ) : null}
+
+                {showTerminal ? (
+                  <Panel defaultSize="30%" minSize="15%" maxSize="70%">
+                    {renderTerminalBody(false)}
+                  </Panel>
+                ) : null}
+              </PanelGroup>
+            </div>
+          </Panel>
         </PanelGroup>
-          </div>
-      </Panel>
-    </PanelGroup>
+      )}
   </main>
   );
 }
