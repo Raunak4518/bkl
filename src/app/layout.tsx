@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Assignment Upload Portal",
-  description: "A clean, simple interface for uploading assignment files.",
+  title: "RepoLab Studio",
+  description: "A browser-based GitHub workspace for browsing, editing, uploading, and running code.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
